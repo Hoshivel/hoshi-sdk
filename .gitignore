@@ -1,0 +1,17 @@
+# Go
+*.test
+*.out
+
+# Node —— 本倉庫零相依，node_modules 只會是誤裝的產物
+node_modules/
+npm-debug.log*
+
+# Python 工具
+__pycache__/
+*.pyc
+
+# 編輯器 / 作業系統
+.DS_Store
+*.swp
+.idea/
+.vscode/

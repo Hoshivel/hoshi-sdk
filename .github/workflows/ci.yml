@@ -1,0 +1,92 @@
+# 主分支的驗證。
+#
+# 驗證的正本是 `AGENTS.md` §2 列的那兩層（Go 與 JS）；這裡照它跑，不多也不少。
+#
+# 本倉庫是公開的，且零相依：`go/go.mod` 永遠沒有 `require` 區塊，
+# `js/package.json` 永遠沒有 dependencies。所以這支 workflow **不需要任何
+# secret**，fork 送來的 PR 也跑得完整。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # 開了 PR 就在合併前先驗一次，但**草稿不跑**（下面每個 job 的 `if`）。
+  # 迭代期間開成 draft，改好再標 ready for review——那一刻才觸發。
+  #
+  # 這與「工作分支的頻繁推送不該花 CI」並不衝突：沒有開 PR 的分支不會觸發，
+  # 開了 PR 但還是草稿的也不會。換到的是**合併前就知道壞了**，
+  # 而不是等合併後才發現壞了。
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+# 同一個 PR 上再推一次，就取消前一次還沒跑完的執行，只留最後一顆 commit 的結果。
+#
+# **`main` 不取消**（所以用 event_name 判斷，不是無條件 true）：那裡的每一次
+# 執行都對應一次真的合併，取消掉就沒有任何地方記得那次合併驗過沒有——
+# 而那正是加 CI 想消滅的狀態。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    # 草稿 PR 不跑。push 與手動觸發不受影響。
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: Go SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          # 零相依，沒有 go.sum 可以當 cache key。
+          cache: false
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      # `gofmt -l` 對不合格式的檔案是**印出檔名並以 0 結束**，所以直接跑它
+      # 永遠是綠的。要讓它會失敗，得自己看輸出是不是空的。
+      - name: gofmt -l .（須無輸出）
+        run: |
+          set -euo pipefail
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "::error::以下檔案未經 gofmt："
+            echo "$out"
+            exit 1
+          fi
+
+      - run: go test -race ./...
+
+  js:
+    # 草稿 PR 不跑。push 與手動觸發不受影響。
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: JS SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          # 沒有 dependencies 就沒有 lockfile，也就沒有東西可快取。
+          # `npm test` 走 Node 內建的 test runner，不需要 `npm install`。
+          cache: ""
+
+      - run: npm test

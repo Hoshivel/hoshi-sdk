@@ -1,0 +1,27 @@
+{
+  "name": "@hoshivel/hoshi-sdk",
+  "version": "1.0.0",
+  "description": "OpenID Connect relying-party client for JavaScript. Zero dependencies.",
+  "license": "Apache-2.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.js",
+    "./identity": "./src/identity.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hoshivel/hoshi-sdk.git",
+    "directory": "js"
+  }
+}
