@@ -71,6 +71,29 @@ defer stop()
 lifecycle.BeginShutdown(logger, sigctx.SignalName())
 ```
 
+### 這支執行檔是哪一顆 commit
+
+Go 會把 VCS 資訊蓋進每一支從版控目錄建出來的執行檔，**不需要在建置時注入
+任何東西**。`-ldflags "-s -w"` 剝的是符號表與 DWARF、`-trimpath` 剝的是檔案
+路徑，兩者都不動 build info 區段。
+
+```go
+log.Info("starting", append([]any{"addr", addr}, lifecycle.BuildOf().LogAttrs()...)...)
+// starting addr=127.0.0.1:8080 build=b1f44c03a787 built_at=2026-08-10T00:58:49Z
+```
+
+工作目錄在建置時不乾淨的話，`Short()` 會多一個 `+dirty`——那代表
+**revision 本身已經不足以指認跑的是什麼**：
+
+```
+build=b1f44c03a787          乾淨
+build=b1f44c03a787+dirty    建置時有未提交的改動
+build=unknown               不是從版控目錄建的（go run 裸目錄、解壓的原始碼）
+```
+
+`unknown` 是刻意說出口的，不是回空字串——空字串在結構化日誌裡讀起來是
+「這個欄位沒設定」，而「我們不知道這是哪一顆」是另一回事。
+
 ## `identity`
 
 OpenID Connect 呼叫端。機器對機器的表面都在這裡：discovery、token、
