@@ -239,7 +239,7 @@ func New(o Options) (*Logger, error) {
 		out = console
 	}
 	if o.File != "" {
-		file, err := newRotator(o)
+		file, err := newRotator(o, nil)
 		if err != nil {
 			return nil, err
 		}

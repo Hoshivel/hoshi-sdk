@@ -216,12 +216,11 @@ func TestRollOnSize(t *testing.T) {
 func TestRollOnDayTurn(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "svc.log")
-	r, err := newRotator(Options{File: path})
+	day := time.Date(2026, 8, 1, 23, 59, 0, 0, time.UTC)
+	r, err := newRotator(Options{File: path}, func() time.Time { return day })
 	if err != nil {
 		t.Fatal(err)
 	}
-	day := time.Date(2026, 8, 1, 23, 59, 0, 0, time.UTC)
-	r.now = func() time.Time { return day }
 	if _, err := r.Write([]byte("before midnight\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -264,11 +263,19 @@ func TestRetainDaysDeletesOldRolls(t *testing.T) {
 		}
 	}
 
-	r, err := newRotator(Options{File: path, RetainDays: 14})
+	// The clock goes in at construction, not after: newRotator prunes once
+	// during startup, so a clock installed on the returned value would arrive
+	// after the deletion it is meant to control. Passing it here also means
+	// this test covers the startup prune — the one that catches up after a
+	// service was down longer than its retention window — rather than only the
+	// explicit call below.
+	r, err := newRotator(Options{File: path, RetainDays: 14}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.now = func() time.Time { return now }
+	if _, err := os.Stat(old); err == nil {
+		t.Fatal("the startup prune kept a roll past the retention window")
+	}
 	r.prune()
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
@@ -297,11 +304,10 @@ func TestMaxFilesCapsRolls(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	r, err := newRotator(Options{File: path, MaxFiles: 2})
+	r, err := newRotator(Options{File: path, MaxFiles: 2}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.now = func() time.Time { return now }
 	r.prune()
 
 	kept := r.rolls()

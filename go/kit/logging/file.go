@@ -55,13 +55,18 @@ const (
 // lexically in chronological order, which is what makes the history readable.
 const rollStamp = "20060102T150405"
 
-func newRotator(o Options) (*rotator, error) {
+// newRotator opens the live file and prunes once. now is the clock seam; nil
+// means time.Now. It is a parameter rather than a field the caller sets after
+// the fact because the startup prune below runs during construction — a clock
+// installed on the returned value arrives too late to affect it, which is a
+// seam that silently does nothing.
+func newRotator(o Options, now func() time.Time) (*rotator, error) {
 	if dir := filepath.Dir(o.File); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, logDirMode); err != nil {
 			return nil, fmt.Errorf("log.file: %w", err)
 		}
 	}
-	r := &rotator{opts: o}
+	r := &rotator{opts: o, now: now}
 	if err := r.open(); err != nil {
 		return nil, err
 	}

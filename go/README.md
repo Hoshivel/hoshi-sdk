@@ -62,6 +62,21 @@ sd.Step("drain connections", drain())
 sd.Done()
 ```
 
+**關機分兩種，層級不同。** `BeginShutdown` 是**有秩序的停止**（訊號、操作者要求），
+announce 走 `info`——跑在 `warn` 的部署看不到它，那是刻意的：例行重啟不該每次都喊。
+
+被某件事**逼停**的用 `BeginFailure`，它把觸發的 error 寫成一筆 `error`：
+
+```go
+sd := lifecycle.BeginFailure(logger, "listener failed", err, "addr", addr)
+sd.Step("database", db.Close())
+sd.Done()      // 不會說 "stopped cleanly"——行程是死於某件事的
+```
+
+差別只在層級，而那正是它獨立成一個函式的理由：最需要這筆紀錄的部署就是跑在
+`warn` 的那些，而在那裡，一行 `info` 會被丟掉，行程就這麼消失、什麼都沒留下。
+`err` 傳 `nil` 代表沒有東西逼停它，等同 `BeginShutdown`。
+
 訊號等待也在這裡：
 
 ```go
