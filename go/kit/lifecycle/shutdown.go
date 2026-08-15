@@ -16,19 +16,55 @@ type Shutdown struct {
 	log    Logger
 	begun  time.Time
 	reason string
+	// caused records that this shutdown was triggered by a failure rather than
+	// by a signal, so Done does not call the result clean.
+	caused bool
 
 	mu     sync.Mutex
 	steps  int
 	failed int
 }
 
-// BeginShutdown announces the shutdown and starts recording it. reason is the
-// cause in a few words — "signal", "listener failed", "operator requested"
-// — and attrs carry the context that makes it actionable.
+// BeginShutdown announces an orderly shutdown and starts recording it. reason
+// is the cause in a few words — "signal", "operator requested" — and attrs
+// carry the context that makes it actionable.
+//
+// The announcement is info, and a deployment running at warn will not see it.
+// That is deliberate: an orderly stop is part of normal operation, and paying
+// for it at warn would mean every routine restart shouts. A shutdown that was
+// *caused by something going wrong* is not this function's job — use
+// BeginFailure, which is audible at warn.
 func BeginShutdown(log Logger, reason string, attrs ...any) *Shutdown {
 	s := &Shutdown{log: log, begun: time.Now(), reason: reason}
 	log.Info("shutting down", append([]any{
 		"reason", reason,
+		"uptime", Uptime().Round(time.Millisecond).String(),
+	}, attrs...)...)
+	return s
+}
+
+// BeginFailure announces a shutdown that something forced — a listener that
+// could not bind, a dependency that will not answer — and records it the same
+// way BeginShutdown does from there on.
+//
+// The difference is the level, and it is the whole point of having two
+// functions. The triggering error goes out at error, not as a field on an info
+// line, because the deployments that most need this record are the ones running
+// at warn: there, an info announcement is dropped and the process disappears
+// having written nothing at all. Done() will not report "stopped cleanly"
+// afterwards either — the process died of something, and a summary saying
+// otherwise is worse than no summary.
+//
+// A nil err means nothing forced this, so it is an orderly shutdown and is
+// announced as one.
+func BeginFailure(log Logger, reason string, err error, attrs ...any) *Shutdown {
+	if err == nil {
+		return BeginShutdown(log, reason, attrs...)
+	}
+	s := &Shutdown{log: log, begun: time.Now(), reason: reason, caused: true}
+	log.Error("shutting down", append([]any{
+		"reason", reason,
+		"error", err,
 		"uptime", Uptime().Round(time.Millisecond).String(),
 	}, attrs...)...)
 	return s
@@ -60,6 +96,11 @@ func (s *Shutdown) Step(name string, err error, attrs ...any) {
 // a shutdown with a failed step is how state gets left behind — a lease not
 // released, a connection not closed, a game not handed over — and that is the
 // thing someone will be looking for later.
+//
+// A shutdown opened by BeginFailure is also warn even when every step
+// succeeded: tearing down neatly after a listener died is not stopping
+// cleanly, and at warn that summary would otherwise be the only line the
+// deployment could have seen.
 func (s *Shutdown) Done(attrs ...any) {
 	s.mu.Lock()
 	steps, failed := s.steps, s.failed
@@ -73,6 +114,10 @@ func (s *Shutdown) Done(attrs ...any) {
 	}, attrs...)
 	if failed > 0 {
 		s.log.Warn("stopped with errors during shutdown", append(fields, "failed_steps", failed)...)
+		return
+	}
+	if s.caused {
+		s.log.Warn("stopped after a failure", fields...)
 		return
 	}
 	s.log.Info("stopped cleanly", fields...)
