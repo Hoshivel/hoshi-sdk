@@ -59,6 +59,24 @@ jobs:
 
       - run: go vet ./...
 
+      # **交叉編譯：我能不能在開發環境裡建立生產執行檔？**（裁示 2026-08-22）
+      #
+      # 這與 `platforms` 那個 job **各回答一個問題，不得互相代替**：那一支在
+      # 目標平臺上真的跑，問的是「有沒有遺漏平臺特定語法可能造成失敗」；
+      # 這一步只編，問的是「這份原始碼對得起它宣稱支援的目標」。
+      # 交叉編譯壞掉時原生 job 照樣綠——它是在目標平臺上原生編的。
+      #
+      # **本倉庫是公開的，所以目標清單不是我們的部署決定**：使用者在什麼
+      # 平臺上編譯我們不知道，能編的就都編一遍。
+      - name: 交叉編譯（每個目標都要編得過）
+        run: |
+          set -euo pipefail
+          for target in windows/amd64 darwin/amd64 darwin/arm64 linux/arm64 linux/amd64; do
+            echo "== ${target}"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
+
       # `gofmt -l` 對不合格式的檔案是**印出檔名並以 0 結束**，所以直接跑它
       # 永遠是綠的。要讓它會失敗，得自己看輸出是不是空的。
       - name: gofmt -l .（須無輸出）
@@ -137,6 +155,64 @@ jobs:
 
       - run: npm test
 
+  platforms:
+    # **真的在目標平臺上跑，不是交叉編譯。**（裁示 2026-08-22）
+    #
+    # 這一支問的是：**有沒有遺漏平臺特定語法可能造成失敗？**
+    # `Go SDK` 那個 job 的〈交叉編譯〉那一步問的是另一件事——
+    # **我能不能在開發環境裡建立生產執行檔**——它只編，不跑，
+    # 所以看不到任何執行期的平臺差異。**兩邊都要。**
+    #
+    # **本倉庫比其他倉庫更需要這一層，因為它是公開的。** 內部服務出貨到
+    # Debian 節點，平臺是我們自己決定的；這裡的使用者是誰、在什麼作業系統上
+    # 編譯，我們不知道。一個「只在 Linux 上成立」的假設，在這裡是對外承諾的
+    # 一部分，而不是一個部署細節。
+    #
+    # 第一次跑就抓到兩個（2026-08-22）：`logging` 斷言 log 檔是 0600，
+    # 而 NTFS 沒有 POSIX mode；`lifecycle` 的測試用 `syscall.SIGUSR1`，
+    # Windows 沒有這個符號，**整個測試套件編不過**。
+    #
+    # **每個指令一個步驟，不是一個多行 `run`。** windows runner 的預設 shell
+    # 是 pwsh，而 GitHub 只在最後附一句 `exit $LASTEXITCODE`——多行 run 裡
+    # 前面那幾個原生指令失敗**不會**中止腳本，只有最後一個的結束碼算數。
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, label: Windows }
+          - { os: macos-latest, label: macOS }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      # **不帶 `-race`**：Windows 的 race detector 要 cgo 與一支 C compiler，
+      # 而競態那一層 `Go SDK` 那個 job 已經驗過了。
+      - run: go test ./... -count=1
+
+      # JS 那一半同樣沒有平臺保證可言——它跑在使用者的 Node 上，而那可能是
+      # 任何一個作業系統。零相依所以不必 install。
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: ""
+
+      - run: npm test
+        working-directory: js
+
   # 安全掃描接在基礎驗證之後：基礎驗證紅燈時整組 **skipped**，而不是拿一份
   # 編譯不過的原始碼去跑掃描，再收到一顆與根因無關的第二紅燈。
   #
@@ -151,22 +227,23 @@ jobs:
   #
   # 掃描本身的定義在 `security.yml`，那支同時還掛著每週排程（**不**經過這道閘）。
   security:
-    # **這一組在 PR 上也跑，但裡面只有 Gitleaks 會動**（裁示 2026-08-16）。
+    # **這一組在 PR 上全部會跑**（裁示 2026-08-21）。
     #
-    # 判準是「漏到 `main` 之後要付什麼」：
+    # 2026-08-16 到 08-21 之間只有 Gitleaks 會動，其餘三種各自帶一條
+    # `if: github.event_name != 'pull_request'`。當時的判準是「漏到 `main`
+    # 之後要付什麼」：CodeQL／govulncheck／Trivy 找到的東西**修一次就結束**，
+    # 在 PR 攔下與在 `main` 攔下代價一樣，所以省下每個 PR 數分鐘；只有
+    # Gitleaks 代價不同（憑證已經在 git 歷史裡，刪掉不夠，**必須輪替**），
+    # 所以它留在 PR。
     #
-    # | | 補救 |
-    # |---|---|
-    # | CodeQL／govulncheck／Trivy | **修程式**，修好就結束 |
-    # | **Gitleaks** | 刪掉不夠——憑證已經在 git 歷史裡，**必須輪替** |
+    # **前半仍然成立，後半不再是收益**：升上 Enterprise 之後分鐘數不是稀缺的
+    # 東西了，而代價一直都在——一個在 `main` 才被攔下的問題，是一個**已經
+    # 合併**的問題。判準因此收斂成一句：**CI 做得到的驗證，就讓它在合併前跑。**
+    # 那三條 `if` 已於 2026-08-21 從 `security.yml` 拆掉。
     #
-    # 前三種在 PR 攔下與在 `main` 攔下代價一樣，所以留在 `main`（省下每個 PR
-    # 數分鐘）；Gitleaks 是唯一代價不同的，所以掛回 PR。
-    #
-    # **閘門下移到被呼叫的那三個 job 上**（`security.yml` 裡各自的
-    # `if: github.event_name != 'pull_request'`），不是留在這裡——留在這裡會把
-    # Gitleaks 一起關掉。這樣做同時保住了檢查名稱：它仍然是
-    # `安全掃描 / Gitleaks`，按名字釘住的分支保護不受影響。
+    # **`needs: [verify]` 那道閘留著，理由與成本無關**：建置壞掉時 CodeQL 的
+    # autobuild 與 govulncheck 吐的是同一個編譯錯誤換一種包裝，多餘的紅燈會
+    # 稀釋掉真的那一顆。每週排程**不**經過它（見上方 `on:` 的註解）。
     name: 安全掃描
     # 閘門對公開倉庫也成立了（裁示 2026-08-16）：掃描要先等基礎驗證綠。
     # 取代 workspace decisions/infrastructure/公開倉庫的掃描不經閘門.md
