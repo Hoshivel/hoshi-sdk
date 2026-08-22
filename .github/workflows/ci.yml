@@ -10,12 +10,17 @@ name: CI
 on:
   push:
     branches: [main]
-  # 開了 PR 就在合併前先驗一次，但**草稿不跑**（下面每個 job 的 `if`）。
-  # 迭代期間開成 draft，改好再標 ready for review——那一刻才觸發。
+  # 開了 PR 就在合併前先驗一次，**草稿也跑**（裁示 2026-08-21）。
   #
-  # 這與「工作分支的頻繁推送不該花 CI」並不衝突：沒有開 PR 的分支不會觸發，
-  # 開了 PR 但還是草稿的也不會。換到的是**合併前就知道壞了**，
-  # 而不是等合併後才發現壞了。
+  # 沒有開 PR 的分支仍然不會觸發，所以「工作分支的頻繁推送不該花 CI」照舊
+  # 成立；改掉的是草稿那一段。草稿不跑換到的是迭代期間省下的分鐘數，而升上
+  # Enterprise 之後那不是收益；付出的是**最需要早點知道的那個階段沒有網子**。
+  #
+  # > **註**：這段註解在 2026-08-21 之前寫著「草稿不跑（下面每個 job 的
+  # > `if`）」，而那個 `if` **十五個倉庫裡只有兩個真的有**（hoshi-build 與
+  # > hoshi-standards）。也就是說十三個倉庫的草稿 PR 一直都在跑 CI，
+  # > 註解描述的是一件沒有發生的事。它的方向是「以為更省」，
+  # > 所以不會有任何帳單或紅燈讓人發現它——**一份說謊的註解不會自己壞掉**。
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -54,6 +59,24 @@ jobs:
 
       - run: go vet ./...
 
+      # **交叉編譯：我能不能在開發環境裡建立生產執行檔？**（裁示 2026-08-22）
+      #
+      # 這與 `platforms` 那個 job **各回答一個問題，不得互相代替**：那一支在
+      # 目標平臺上真的跑，問的是「有沒有遺漏平臺特定語法可能造成失敗」；
+      # 這一步只編，問的是「這份原始碼對得起它宣稱支援的目標」。
+      # 交叉編譯壞掉時原生 job 照樣綠——它是在目標平臺上原生編的。
+      #
+      # **本倉庫是公開的，所以目標清單不是我們的部署決定**：使用者在什麼
+      # 平臺上編譯我們不知道，能編的就都編一遍。
+      - name: 交叉編譯（每個目標都要編得過）
+        run: |
+          set -euo pipefail
+          for target in windows/amd64 darwin/amd64 darwin/arm64 linux/arm64 linux/amd64; do
+            echo "== ${target}"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
+
       # `gofmt -l` 對不合格式的檔案是**印出檔名並以 0 結束**，所以直接跑它
       # 永遠是綠的。要讓它會失敗，得自己看輸出是不是空的。
       - name: gofmt -l .（須無輸出）
@@ -67,6 +90,51 @@ jobs:
           fi
 
       - run: go test -race ./...
+
+      # **覆蓋率：量出來、報出來，不設下限。**
+      #
+      # 2026-08-21 之前**沒有任何倉庫量過**——十五個倉庫的 workflow 裡
+      # `-coverprofile` 一次都沒有出現。一個沒有人看過的數字不會自己變好，
+      # 但更要緊的是：**沒有量的時候，覆蓋率掉下去是沒有症狀的。**
+      #
+      # 刻意**不設下限**。當天量到的十個 Go 倉庫是 42.5%～81.6%，跨度太大，
+      # 一個統一的數字要嘛擋不住任何東西、要嘛讓兩個倉庫從第一天起就紅——
+      # 而一個永遠紅著的檢查等於沒有檢查。下限等使用者看過真實數字再定，
+      # 追蹤在 workspace `todo/CI-覆蓋率-把-CI-做得到的全部跑起來.md`。
+      #
+      # **這個數字不含環境相依的那幾層**（要真的資料庫／瀏覽器／服務的那些，
+      # 見同倉庫其他 workflow）。它量的是這個 job 裡跑得到的部分，
+      # 所以它會比「所有測試都跑起來」的覆蓋率低——不要把它讀成後者。
+      - name: 覆蓋率
+        run: |
+          set -euo pipefail
+          go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}')
+          echo "總覆蓋率：${total}"
+          {
+            echo "### 測試覆蓋率"
+            echo
+            echo "本 job 跑得到的部分：**${total}**"
+            echo
+            echo "> 不含環境相依的那幾層（真的資料庫／瀏覽器／服務），那些有自己的 workflow。"
+            echo
+            echo '<details><summary>逐套件</summary>'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: 保留覆蓋率報告
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 30
+          if-no-files-found: warn
 
   js:
     name: JS SDK
@@ -87,34 +155,95 @@ jobs:
 
       - run: npm test
 
-  # **本倉庫是公開的，所以掃描與 `go、js` 同時起跑**，不等它們綠燈。
+  platforms:
+    # **真的在目標平臺上跑，不是交叉編譯。**（裁示 2026-08-22）
+    #
+    # 這一支問的是：**有沒有遺漏平臺特定語法可能造成失敗？**
+    # `Go SDK` 那個 job 的〈交叉編譯〉那一步問的是另一件事——
+    # **我能不能在開發環境裡建立生產執行檔**——它只編，不跑，
+    # 所以看不到任何執行期的平臺差異。**兩邊都要。**
+    #
+    # **本倉庫比其他倉庫更需要這一層，因為它是公開的。** 內部服務出貨到
+    # Debian 節點，平臺是我們自己決定的；這裡的使用者是誰、在什麼作業系統上
+    # 編譯，我們不知道。一個「只在 Linux 上成立」的假設，在這裡是對外承諾的
+    # 一部分，而不是一個部署細節。
+    #
+    # 第一次跑就抓到兩個（2026-08-22）：`logging` 斷言 log 檔是 0600，
+    # 而 NTFS 沒有 POSIX mode；`lifecycle` 的測試用 `syscall.SIGUSR1`，
+    # Windows 沒有這個符號，**整個測試套件編不過**。
+    #
+    # **每個指令一個步驟，不是一個多行 `run`。** windows runner 的預設 shell
+    # 是 pwsh，而 GitHub 只在最後附一句 `exit $LASTEXITCODE`——多行 run 裡
+    # 前面那幾個原生指令失敗**不會**中止腳本，只有最後一個的結束碼算數。
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, label: Windows }
+          - { os: macos-latest, label: macOS }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache: false
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      # **不帶 `-race`**：Windows 的 race detector 要 cgo 與一支 C compiler，
+      # 而競態那一層 `Go SDK` 那個 job 已經驗過了。
+      - run: go test ./... -count=1
+
+      # JS 那一半同樣沒有平臺保證可言——它跑在使用者的 Node 上，而那可能是
+      # 任何一個作業系統。零相依所以不必 install。
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: ""
+
+      - run: npm test
+        working-directory: js
+
+  # 安全掃描接在基礎驗證之後：基礎驗證紅燈時整組 **skipped**，而不是拿一份
+  # 編譯不過的原始碼去跑掃描，再收到一顆與根因無關的第二紅燈。
   #
-  # 公開倉庫的 Actions 分鐘數不計費，所以「基礎驗證紅燈時整組 skipped、
-  # 省下執行器時間」在這裡換不到任何東西，只換到更晚才知道掃描的結論。
-  # 代價要講清楚：建置壞掉時 CodeQL 的 autobuild 與 govulncheck 會吐同一個
-  # 編譯錯誤換一種包裝，所以一顆真的紅燈會伴隨幾顆指向同一個根因的紅燈。
+  # > **註**：這段文字到 2026-08-21 為止寫的是「**本倉庫是公開的，所以掃描與
+  # > 基礎驗證同時起跑**，不等它綠燈」，理由是公開倉庫的 Actions 分鐘數不計費。
+  # > 那個形狀在 2026-08-16 就被取代了，而**取代它的 `needs:` 一直都在**
+  # > （就在下面幾行，還帶著自己的註解）——沒有跟上的只有這段文字。
+  # >
+  # > 它還聲明「兩種形狀是刻意的，不是漂移；判準見 workspace `AGENTS.md`
+  # > §1.9.1」，而 §1.9.1 說的正好相反。**一段指著條文說自己不必照辦的註解，
+  # > 比沒有註解更糟**：它讓讀者以為這裡已經對照過了，於是沒有人去比對。
   #
-  # **私有倉庫維持 `needs:` 那道閘**——那裡的分鐘數要付錢。兩種形狀是刻意的，
-  # 不是漂移；判準與理由見 workspace `AGENTS.md` §1.9.1。
-  #
-  # 掃描本身的定義在 `security.yml`，那支同時還掛著每週排程。
+  # 掃描本身的定義在 `security.yml`，那支同時還掛著每週排程（**不**經過這道閘）。
   security:
-    # **這一組在 PR 上也跑，但裡面只有 Gitleaks 會動**（裁示 2026-08-16）。
+    # **這一組在 PR 上全部會跑**（裁示 2026-08-21）。
     #
-    # 判準是「漏到 `main` 之後要付什麼」：
+    # 2026-08-16 到 08-21 之間只有 Gitleaks 會動，其餘三種各自帶一條
+    # `if: github.event_name != 'pull_request'`。當時的判準是「漏到 `main`
+    # 之後要付什麼」：CodeQL／govulncheck／Trivy 找到的東西**修一次就結束**，
+    # 在 PR 攔下與在 `main` 攔下代價一樣，所以省下每個 PR 數分鐘；只有
+    # Gitleaks 代價不同（憑證已經在 git 歷史裡，刪掉不夠，**必須輪替**），
+    # 所以它留在 PR。
     #
-    # | | 補救 |
-    # |---|---|
-    # | CodeQL／govulncheck／Trivy | **修程式**，修好就結束 |
-    # | **Gitleaks** | 刪掉不夠——憑證已經在 git 歷史裡，**必須輪替** |
+    # **前半仍然成立，後半不再是收益**：升上 Enterprise 之後分鐘數不是稀缺的
+    # 東西了，而代價一直都在——一個在 `main` 才被攔下的問題，是一個**已經
+    # 合併**的問題。判準因此收斂成一句：**CI 做得到的驗證，就讓它在合併前跑。**
+    # 那三條 `if` 已於 2026-08-21 從 `security.yml` 拆掉。
     #
-    # 前三種在 PR 攔下與在 `main` 攔下代價一樣，所以留在 `main`（省下每個 PR
-    # 數分鐘）；Gitleaks 是唯一代價不同的，所以掛回 PR。
-    #
-    # **閘門下移到被呼叫的那三個 job 上**（`security.yml` 裡各自的
-    # `if: github.event_name != 'pull_request'`），不是留在這裡——留在這裡會把
-    # Gitleaks 一起關掉。這樣做同時保住了檢查名稱：它仍然是
-    # `安全掃描 / Gitleaks`，按名字釘住的分支保護不受影響。
+    # **`needs: [verify]` 那道閘留著，理由與成本無關**：建置壞掉時 CodeQL 的
+    # autobuild 與 govulncheck 吐的是同一個編譯錯誤換一種包裝，多餘的紅燈會
+    # 稀釋掉真的那一顆。每週排程**不**經過它（見上方 `on:` 的註解）。
     name: 安全掃描
     # 閘門對公開倉庫也成立了（裁示 2026-08-16）：掃描要先等基礎驗證綠。
     # 取代 workspace decisions/infrastructure/公開倉庫的掃描不經閘門.md

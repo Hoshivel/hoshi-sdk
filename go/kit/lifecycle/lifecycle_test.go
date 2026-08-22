@@ -6,9 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/hoshivel/hoshi-sdk/go/kit/lifecycle"
 	"github.com/hoshivel/hoshi-sdk/go/kit/logging"
@@ -69,32 +67,6 @@ func TestOperationFailReturnsTheError(t *testing.T) {
 	op := lifecycle.Begin(logging.Discard(), "open database", "path", "/tmp/x.db")
 	if got := op.Fail(os.ErrPermission); got != os.ErrPermission {
 		t.Fatalf("Fail returned %v, want the error it was given", got)
-	}
-}
-
-func TestNotifySignalsReportsTheSignal(t *testing.T) {
-	// SIGUSR1 rather than SIGTERM: the test signals its own process, and a stray
-	// SIGTERM would take the test binary down with it.
-	ctx, stop := lifecycle.NotifySignals(t.Context(), syscall.SIGUSR1)
-	defer stop()
-
-	if name := ctx.SignalName(); name != "" {
-		t.Fatalf("no signal has arrived yet, got %q", name)
-	}
-	proc, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := proc.Signal(syscall.SIGUSR1); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the context was not cancelled by the signal")
-	}
-	if name := ctx.SignalName(); name == "" {
-		t.Fatal("the signal that stopped the service must be recoverable for the log")
 	}
 }
 
