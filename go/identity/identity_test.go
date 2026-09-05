@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -61,6 +62,11 @@ func newProvider(t *testing.T) *provider {
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 			"code_challenge_methods_supported":      []string{"S256"},
 			"scopes_supported":                      []string{"openid", "profile", "email", "roles"},
+			// Three deliberately different lists. Equal ones would let a field
+			// that reads the wrong key still pass.
+			"token_endpoint_auth_methods_supported":         []string{"client_secret_basic"},
+			"revocation_endpoint_auth_methods_supported":    []string{"client_secret_basic", "none"},
+			"introspection_endpoint_auth_methods_supported": []string{"client_secret_post"},
 		})
 	})
 
@@ -191,6 +197,33 @@ func TestDiscoverCachesAndValidatesIssuer(t *testing.T) {
 	}
 	if got := p.discHits.Load(); got != 1 {
 		t.Errorf("discovery fetched %d times, want 1 (should be cached)", got)
+	}
+}
+
+func TestDiscoverReadsEachEndpointsAuthMethods(t *testing.T) {
+	// A provider may accept different client authentication at each endpoint,
+	// so the three lists are three fields. The fixture serves three different
+	// values: reading the token endpoint's list for all of them, or crossing
+	// two tags, changes the result here.
+	p := newProvider(t)
+	c := newClient(t, p)
+
+	doc, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"token", doc.TokenEndpointAuthMethodsSupported, []string{"client_secret_basic"}},
+		{"revocation", doc.RevocationEndpointAuthMethodsSupported, []string{"client_secret_basic", "none"}},
+		{"introspection", doc.IntrospectionEndpointAuthMethodsSupported, []string{"client_secret_post"}},
+	} {
+		if !slices.Equal(tc.got, tc.want) {
+			t.Errorf("%s endpoint auth methods = %v, want %v", tc.name, tc.got, tc.want)
+		}
 	}
 }
 
