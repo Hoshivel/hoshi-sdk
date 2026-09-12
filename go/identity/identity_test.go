@@ -744,6 +744,8 @@ func TestJWKSRefetchIsRateLimited(t *testing.T) {
 	p := newProvider(t)
 	c := newClient(t, p)
 	ctx := context.Background()
+	now := time.Now()
+	c.now = func() time.Time { return now }
 
 	// Prime the cache.
 	if _, err := c.VerifyIDToken(ctx, signToken(t, testKID, validClaims(p.URL)), "n-1"); err != nil {
@@ -766,10 +768,11 @@ func TestJWKSRefetchIsRateLimited(t *testing.T) {
 		t.Errorf("jwks fetched %d times after 5 unknown kids, want 1", got)
 	}
 
-	// Once the interval has passed, a genuine rotation is picked up.
-	c.mu.Lock()
-	c.keys.fetchedAt = time.Now().Add(-2 * jwksRefetchInterval)
-	c.mu.Unlock()
+	// Once the interval has passed, a genuine rotation is picked up. Advance the
+	// clock rather than back-dating a cache field: the rate limit is on when a
+	// fetch was last *attempted*, and a test that moves some other field is
+	// describing the implementation instead of the behaviour.
+	now = now.Add(2 * jwksRefetchInterval)
 	p.kid = "key-2"
 
 	if _, err := c.VerifyIDToken(ctx, signToken(t, "key-2", validClaims(p.URL)), "n-1"); err != nil {
