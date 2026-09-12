@@ -40,11 +40,15 @@ const jwksRefetchInterval = time.Minute
 //
 // The value is a trade-off with no universally right answer: it bounds how long
 // a withdrawn key keeps working, and it is also how often a busy process talks
-// to the provider. Five minutes keeps the outbound cost negligible (a JWKS is
-// tiny, and at most one fetch per jwksRefetchInterval is attempted) while
-// keeping the window short enough to sit inside the time any revocation
-// mechanism layered above this client declares for itself.
-const jwksMaxAge = 5 * time.Minute
+// to the provider. Fifteen minutes is the same order as the discovery document's
+// own lifetime, so a steady process settles into roughly one extra exchange with
+// the provider per quarter hour.
+//
+// It is an upper bound on the window, not a promise about it. Anything that
+// needs a withdrawn key to stop working sooner than this cannot get that from an
+// expiring cache: it has to ask an authority per request, because a cache can
+// only ever say what was true when it was filled.
+const jwksMaxAge = 15 * time.Minute
 
 // IDToken is the verified content of an id_token. It is only ever returned by
 // VerifyIDToken, so a value of this type has had its signature and claims
