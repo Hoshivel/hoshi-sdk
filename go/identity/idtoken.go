@@ -19,7 +19,7 @@ import (
 // operator can find.
 const clockSkew = 2 * time.Minute
 
-// jwksRefetchInterval bounds how often an unknown kid triggers a JWKS fetch.
+// jwksRefetchInterval bounds how often a JWKS fetch may be attempted.
 //
 // Refetching on an unknown kid is what makes key rotation transparent. Doing it
 // without a bound hands anyone who can present a token a way to make this
@@ -27,6 +27,28 @@ const clockSkew = 2 * time.Minute
 // become a stream of outbound requests. Between fetches an unknown kid is
 // simply rejected, which is the correct answer for a forged one anyway.
 const jwksRefetchInterval = time.Minute
+
+// jwksMaxAge is how long a cached key set may answer for a kid it does contain.
+//
+// A cache that only refetches for *unknown* kids never stops trusting the keys
+// it already holds. That is the failure this bound exists for: when a provider
+// withdraws a signing key — because it was compromised, or because the tokens
+// it signed are being invalidated — a long-lived process holding the old set
+// keeps accepting those tokens for as long as it runs. Verifying a signature
+// proves who signed a token, never that the signer is still trusted, so the
+// answer has to expire on its own.
+//
+// The value is a trade-off with no universally right answer: it bounds how long
+// a withdrawn key keeps working, and it is also how often a busy process talks
+// to the provider. Fifteen minutes is the same order as the discovery document's
+// own lifetime, so a steady process settles into roughly one extra exchange with
+// the provider per quarter hour.
+//
+// It is an upper bound on the window, not a promise about it. Anything that
+// needs a withdrawn key to stop working sooner than this cannot get that from an
+// expiring cache: it has to ask an authority per request, because a cache can
+// only ever say what was true when it was filled.
+const jwksMaxAge = 15 * time.Minute
 
 // IDToken is the verified content of an id_token. It is only ever returned by
 // VerifyIDToken, so a value of this type has had its signature and claims
@@ -246,18 +268,31 @@ type jwksDoc struct {
 	} `json:"keys"`
 }
 
-// signingKey returns the public key for kid, fetching the JWKS if the key is
-// not cached and a fetch is not rate-limited.
+// signingKey returns the public key for kid, fetching the JWKS if the cached
+// set cannot answer and a fetch is not rate-limited.
+//
+// A cached key answers only while the set is younger than jwksMaxAge. Past that
+// the set has to be re-fetched even for a kid it holds, so a key the provider
+// has withdrawn stops being accepted. When the refetch cannot be made — the
+// provider is unreachable, or another attempt was just made — the token is
+// rejected rather than verified against the expired set: a key that can no
+// longer be confirmed is not a key this client can still vouch for.
 func (c *Client) signingKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	c.mu.Lock()
-	cached := c.keys
+	cached, attemptedAt := c.keys, c.keyAttemptAt
 	c.mu.Unlock()
 
+	now := c.clock()
 	if cached != nil {
-		if key, ok := cached.keys[kid]; ok {
+		key, known := cached.keys[kid]
+		if known && now.Sub(cached.fetchedAt) < jwksMaxAge {
 			return key, nil
 		}
-		if c.clock().Sub(cached.fetchedAt) < jwksRefetchInterval {
+		if now.Sub(attemptedAt) < jwksRefetchInterval {
+			if known {
+				return nil, errors.New(
+					"identity: cached signing keys are stale and a refetch was rate-limited")
+			}
 			return nil, fmt.Errorf("identity: id_token signed by unknown key %q", kid)
 		}
 	}
@@ -274,6 +309,14 @@ func (c *Client) signingKey(ctx context.Context, kid string) (*rsa.PublicKey, er
 }
 
 func (c *Client) fetchJWKS(ctx context.Context) (*keySet, error) {
+	// Record the attempt before making it, so that a provider which is failing
+	// or slow is retried no more often than one which is answering. Rate
+	// limiting on the last *success* would leave an unreachable provider being
+	// asked once per token.
+	c.mu.Lock()
+	c.keyAttemptAt = c.clock()
+	c.mu.Unlock()
+
 	doc, err := c.Discover(ctx)
 	if err != nil {
 		return nil, err

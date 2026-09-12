@@ -85,6 +85,8 @@ type Client struct {
 	discovery *Discovery
 	fetchedAt time.Time
 	keys      *keySet
+	// keyAttemptAt is when a JWKS fetch was last attempted, successful or not.
+	keyAttemptAt time.Time
 	// now is the clock, swappable in tests.
 	now func() time.Time
 }
